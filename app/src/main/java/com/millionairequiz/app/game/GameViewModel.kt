@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.millionairequiz.app.data.ClaudeClient
+import com.millionairequiz.app.data.CHEAP_MODEL
 import com.millionairequiz.app.data.ClaudeException
 import com.millionairequiz.app.data.DEFAULT_MODEL
 import com.millionairequiz.app.data.Prefs
@@ -52,6 +53,7 @@ data class UiState(
     val friendName: String = "Sam",
     val apiKey: String = "",
     val model: String = "",
+    val cheapEasy: Boolean = true,
     val showSettings: Boolean = false,
     // Current question
     val level: Int = 0,
@@ -83,6 +85,12 @@ data class UiState(
 
 class GameViewModel(app: Application) : AndroidViewModel(app) {
 
+    private companion object {
+        const val BATCH_SIZE = 5
+        /** Start fetching the next batch when the player reaches this question of the current one (0-based). */
+        const val PREFETCH_AT = 2
+    }
+
     private val prefs = Prefs(app)
     private val random = Random.Default
 
@@ -92,14 +100,19 @@ class GameViewModel(app: Application) : AndroidViewModel(app) {
             friendName = prefs.friendName,
             apiKey = prefs.apiKey,
             model = prefs.model,
+            cheapEasy = prefs.cheapEasy,
         )
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
 
-    /** Texts of questions already shown this game, so the model doesn't repeat itself. Main thread only. */
-    private val askedQuestions = mutableListOf<String>()
-    private var prefetch: Deferred<Question>? = null
-    private var prefetchLevel = -1
+    // Questions arrive in batches of five (one API call each). All of these are main-thread only.
+    /** Questions received so far this game, by level. */
+    private val questions = mutableMapOf<Int, Question>()
+    /** Texts of every question generated this game, sent with later batches so nothing repeats. */
+    private val generatedTexts = mutableListOf<String>()
+    /** In-flight or finished batch requests, by batch index (0 = Q1-5, 1 = Q6-10, 2 = Q11-15). */
+    private val batchJobs = mutableMapOf<Int, Deferred<List<Question>>>()
+    private val storedBatches = mutableSetOf<Int>()
     private var questionJob: Job? = null
     private var revealJob: Job? = null
 
@@ -110,12 +123,13 @@ class GameViewModel(app: Application) : AndroidViewModel(app) {
     fun openSettings() = _state.update { it.copy(showSettings = true) }
     fun closeSettings() = _state.update { it.copy(showSettings = false) }
 
-    fun saveSettings(apiKey: String, model: String) {
+    fun saveSettings(apiKey: String, model: String, cheapEasy: Boolean) {
         val key = apiKey.trim()
         val m = model.trim().ifEmpty { DEFAULT_MODEL }
         prefs.apiKey = key
         prefs.model = m
-        _state.update { it.copy(apiKey = key, model = m, showSettings = false) }
+        prefs.cheapEasy = cheapEasy
+        _state.update { it.copy(apiKey = key, model = m, cheapEasy = cheapEasy, showSettings = false) }
     }
 
     fun startGame() {
@@ -131,13 +145,16 @@ class GameViewModel(app: Application) : AndroidViewModel(app) {
         prefs.friendName = friend
 
         cancelBackgroundWork()
-        askedQuestions.clear()
+        questions.clear()
+        generatedTexts.clear()
+        storedBatches.clear()
         _state.value = UiState(
             screen = Screen.GAME,
             topic = topic,
             friendName = friend,
             apiKey = s.apiKey,
             model = s.model,
+            cheapEasy = s.cheapEasy,
         )
         loadQuestion(0)
     }
@@ -152,33 +169,78 @@ class GameViewModel(app: Application) : AndroidViewModel(app) {
     /** Overridable for tests against a local fake server. */
     internal var apiBaseUrl = ClaudeClient.DEFAULT_BASE_URL
 
-    private fun client() = ClaudeClient(_state.value.apiKey, _state.value.model, apiBaseUrl)
+    /** Questions 1-5 use the cheap model when "save money" is on; 6-15 use the chosen model. */
+    private fun questionClient(batch: Int): ClaudeClient {
+        val st = _state.value
+        val model = if (st.cheapEasy && batch == 0) CHEAP_MODEL else st.model
+        return ClaudeClient(st.apiKey, model, apiBaseUrl)
+    }
 
-    /** Blocking; run on Dispatchers.IO. Re-asks if the model's JSON is unusable. */
-    private fun generateQuestion(client: ClaudeClient, topic: String, level: Int, previous: List<String>): Question {
+    /** Phone a Friend and Ask the Audience are simple writing jobs, so they use the cheap model when allowed. */
+    private fun lifelineClient(): ClaudeClient {
+        val st = _state.value
+        return ClaudeClient(st.apiKey, if (st.cheapEasy) CHEAP_MODEL else st.model, apiBaseUrl)
+    }
+
+    /**
+     * Blocking; run on Dispatchers.IO. Gets [count] questions starting at [startLevel] in one call,
+     * asking again only for any that came back unusable.
+     */
+    private fun generateBatch(
+        client: ClaudeClient,
+        topic: String,
+        startLevel: Int,
+        count: Int,
+        previous: List<String>,
+    ): List<Question> {
+        val collected = mutableListOf<Question>()
         var lastProblem: String? = null
         repeat(3) {
+            val missing = count - collected.size
             val raw = client.complete(
                 Prompts.QUESTION_SYSTEM,
-                Prompts.questionPrompt(topic, level, previous, Prompts.ANGLES.random(random)),
-                maxTokens = 700,
+                Prompts.batchPrompt(
+                    topic = topic,
+                    startLevel = startLevel + collected.size,
+                    count = missing,
+                    previous = previous + collected.map { it.text },
+                    angles = Prompts.ANGLES.shuffled(random).take(missing + 1),
+                ),
+                maxTokens = 300 * missing + 200,
             )
             try {
-                return Prompts.parseQuestion(raw, random)
+                val known = (previous + collected.map { it.text }).map { it.lowercase() }.toSet()
+                collected += Prompts.parseBatch(raw, random)
+                    .filter { it.text.lowercase() !in known }
+                    .take(missing)
             } catch (e: Exception) {
                 lastProblem = e.message
             }
+            if (collected.size == count) return collected
+            if (lastProblem == null) lastProblem = "only ${collected.size} of $count questions were usable"
         }
-        throw ClaudeException("Couldn't get a usable question from the model ($lastProblem). Try again.")
+        throw ClaudeException("Couldn't get usable questions from the model ($lastProblem). Try again.")
     }
 
-    private fun startPrefetch(level: Int) {
-        if (level > Ladder.LAST_LEVEL) return
-        val client = client()
+    private fun batchOf(level: Int) = level / BATCH_SIZE
+
+    /** Starts fetching a batch unless it is already in flight or done. */
+    private fun startBatch(batch: Int): Deferred<List<Question>> {
+        batchJobs[batch]?.let { return it }
+        val client = questionClient(batch)
         val topic = _state.value.topic
-        val previous = askedQuestions.toList()
-        prefetchLevel = level
-        prefetch = viewModelScope.async(Dispatchers.IO) { generateQuestion(client, topic, level, previous) }
+        val previous = generatedTexts.toList()
+        val job = viewModelScope.async(Dispatchers.IO) {
+            generateBatch(client, topic, batch * BATCH_SIZE, BATCH_SIZE, previous)
+        }
+        batchJobs[batch] = job
+        return job
+    }
+
+    private fun storeBatch(batch: Int, list: List<Question>) {
+        if (!storedBatches.add(batch)) return
+        list.forEachIndexed { i, q -> questions[batch * BATCH_SIZE + i] = q }
+        generatedTexts += list.map { it.text }
     }
 
     private fun loadQuestion(level: Int) {
@@ -190,28 +252,41 @@ class GameViewModel(app: Application) : AndroidViewModel(app) {
                 phone = null, showPhone = false, audience = null, showAudience = false,
             )
         }
-        val pending = prefetch.takeIf { prefetchLevel == level }
-        if (pending == null) prefetch?.cancel()
-        prefetch = null
-        val client = client()
-        val topic = _state.value.topic
-        val previous = askedQuestions.toList()
+        questions[level]?.let {
+            showQuestion(level, it)
+            return
+        }
+        val batch = batchOf(level)
+        val wasPrefetched = batchJobs.containsKey(batch)
         questionJob = viewModelScope.launch {
             try {
-                val prefetched = pending?.let { runCatching { it.await() }.getOrNull() }
-                ensureActive()
-                val q = prefetched ?: withContext(Dispatchers.IO) {
-                    generateQuestion(client, topic, level, previous)
+                val list = try {
+                    startBatch(batch).await()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // A background fetch that failed earlier gets one fresh attempt before we bother the player.
+                    batchJobs.remove(batch)
+                    if (!wasPrefetched) throw e
+                    ensureActive()
+                    startBatch(batch).await()
                 }
-                askedQuestions += q.text
-                _state.update { it.copy(question = q, loading = false) }
-                startPrefetch(level + 1)
+                storeBatch(batch, list)
+                showQuestion(level, questions.getValue(level))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                batchJobs.remove(batch)
                 _state.update { it.copy(loading = false, error = e.message ?: "Something went wrong.") }
             }
         }
+    }
+
+    private fun showQuestion(level: Int, q: Question) {
+        _state.update { it.copy(question = q, loading = false) }
+        // On the third question of a batch, start fetching the next batch in the background.
+        val next = batchOf(level) + 1
+        if (level % BATCH_SIZE == PREFETCH_AT && next * BATCH_SIZE <= Ladder.LAST_LEVEL) startBatch(next)
     }
 
     fun retryQuestion() = loadQuestion(_state.value.level)
@@ -280,9 +355,8 @@ class GameViewModel(app: Application) : AndroidViewModel(app) {
     private fun cancelBackgroundWork() {
         questionJob?.cancel()
         revealJob?.cancel()
-        prefetch?.cancel()
-        prefetch = null
-        prefetchLevel = -1
+        batchJobs.values.forEach { it.cancel() }
+        batchJobs.clear()
     }
 
     // ------------------------------------------------------------------ Lifelines
@@ -313,7 +387,7 @@ class GameViewModel(app: Application) : AndroidViewModel(app) {
         if (!s.canAct) return
         val plan = Lifelines.planFriend(q, s.removed, s.level, random)
         val prompt = Prompts.friendPrompt(s.friendName, s.topic, q, s.removed, plan)
-        val client = client()
+        val client = lifelineClient()
         _state.update { it.copy(usedPhone = true, phone = PhoneState(s.friendName), showPhone = true) }
         viewModelScope.launch {
             try {
@@ -346,7 +420,7 @@ class GameViewModel(app: Application) : AndroidViewModel(app) {
         if (!s.canAct) return
         val removed = s.removed
         val prompt = Prompts.audiencePrompt(s.topic, q, removed)
-        val client = client()
+        val client = lifelineClient()
         _state.update { it.copy(usedAudience = true, audience = AudienceState(), showAudience = true) }
         viewModelScope.launch {
             // If the model can't be reached, the audience still votes, just with flat guesses.

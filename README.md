@@ -27,12 +27,14 @@ Every build is signed with the same key (`app/debug.keystore`), so new builds in
 | Piece | What it does |
 |---|---|
 | `data/ClaudeClient.kt` | Calls the Messages API with `HttpURLConnection` + `org.json` (no networking libraries). Retries on rate limits / overload, turns API errors into readable messages. |
-| `game/Prompts.kt` | All prompts. Questions come back as JSON (`question`, `correct`, `wrong[3]`, `explanation`); the app shuffles the options itself so the right answer isn't always B. |
+| `game/Prompts.kt` | All prompts. Questions come back as a JSON list of five (`question`, `correct`, `wrong[3]`, `explanation`); the app shuffles the options itself so the right answer isn't always B. |
 | `game/Lifelines.kt` | Decides lifeline reliability locally, so they behave like the show: the friend and audience are dependable early and shaky near £1M. |
-| `game/GameViewModel.kt` | Game state machine: choose → "final answer?" → locked in → reveal. Pre-fetches the next question while you think about the current one. |
+| `game/GameViewModel.kt` | Game state machine: choose → "final answer?" → locked in → reveal. Loads questions in batches of five and fetches the next batch in the background. |
 | `ui/` | Jetpack Compose screens: setup, game, money ladder, lifeline dialogs, game over. |
 
-**Questions.** Each question is one API call with the subject, its place on the ladder (difficulty rises from "very easy, playful" to "only a true expert"), a random angle for variety, and the list of questions already asked so nothing repeats.
+**Questions.** They're generated five at a time (questions 1-5, 6-10, 11-15), so a full game is three API calls. Each request lists the five difficulty levels (from "very easy, playful" up to "only a true expert") and every question already generated this game, so nothing repeats. The next five are fetched in the background when you reach the third question of the current set. If any question in a reply is unusable, only that one is asked for again.
+
+**Save money (Settings, on by default).** Questions 1-5 and the two lifeline calls use Claude Haiku 4.5, which costs half as much as Sonnet; questions 6-15 use the model you choose.
 
 **50:50** removes two wrong answers at random (no API call, just like the show).
 

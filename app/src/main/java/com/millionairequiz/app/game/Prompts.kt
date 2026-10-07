@@ -1,5 +1,6 @@
 package com.millionairequiz.app.game
 
+import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.random.Random
 
@@ -10,15 +11,16 @@ object Prompts {
 
     val QUESTION_SYSTEM = """
         You are the question writer for a TV quiz in the style of a 15-question, million-pound multiple-choice show.
-        You write one question at a time on the contestant's chosen subject. Every question must:
+        You write a few questions at a time on the contestant's chosen subject. Every question must:
         - have exactly one unambiguously correct answer that is a well-established fact (no opinions, nothing disputed, nothing that changes often);
         - have three wrong answers that are plausible, of the same kind and similar length as the correct answer, and clearly wrong to an expert;
         - make sense on its own: never refer to pictures, to "this", or to answer letters, and never use "all of the above" or "none of the above";
         - be concise: the question under 30 words, each answer under 8 words.
         Difficulty rises like the real show: the first questions are easy and often playful; the last ones stump most experts.
+        Each question in a set must be about a different fact and, where possible, a different aspect of the subject.
         If the subject is too narrow for the requested difficulty, stay as close to it as you can.
-        Reply with only a JSON object, no markdown fences, in exactly this shape:
-        {"question": "...", "correct": "...", "wrong": ["...", "...", "..."], "explanation": "One or two sentences on why the correct answer is right."}
+        Reply with only a JSON object, no markdown fences, in exactly this shape, with the questions in the order requested:
+        {"questions": [{"question": "...", "correct": "...", "wrong": ["...", "...", "..."], "explanation": "One or two sentences on why the correct answer is right."}]}
     """.trimIndent()
 
     val ANGLES = listOf(
@@ -37,28 +39,56 @@ object Prompts {
         else -> "extremely hard, the million-pound question: obscure but fair, something only a true expert knows"
     }
 
-    fun questionPrompt(topic: String, level: Int, previous: List<String>, angle: String): String =
+    /** Asks for questions [startLevel] until [startLevel] + [count] - 1 (0-based levels) in one call. */
+    fun batchPrompt(topic: String, startLevel: Int, count: Int, previous: List<String>, angles: List<String>): String =
         buildString {
+            val levels = startLevel until startLevel + count
             appendLine("Subject: $topic")
-            appendLine("This is question ${level + 1} of 15, worth ${Ladder.format(Ladder.amounts[level])}.")
-            appendLine("Difficulty: ${difficultyFor(level)}.")
-            appendLine("For variety, approach the subject from this angle if it fits: $angle.")
+            appendLine()
+            appendLine("Write questions ${startLevel + 1} to ${startLevel + count} of 15, in this order, each a little harder than the one before:")
+            levels.forEach { level ->
+                appendLine("${level + 1}. Worth ${Ladder.format(Ladder.amounts[level])}. Difficulty: ${difficultyFor(level)}.")
+            }
+            appendLine()
+            appendLine("For variety, spread them across angles such as: ${angles.joinToString(", ")}.")
             if (previous.isNotEmpty()) {
                 appendLine()
-                appendLine("Questions already asked in this game. Do not repeat them or ask about the same fact:")
+                appendLine("Questions already used in this game. Do not repeat them or ask about the same facts:")
                 previous.forEach { appendLine("- $it") }
             }
             appendLine()
-            append("Write the question now, as JSON only.")
+            append("Reply with the JSON object containing exactly $count questions, and nothing else.")
         }
 
-    /** Parses the model's JSON and shuffles the options so the correct letter is random. */
-    fun parseQuestion(raw: String, random: Random): Question {
-        val obj = JSONObject(extractJsonObject(raw))
+    /**
+     * Reads a batch reply. Accepts {"questions": [...]} or a bare [...] array. Unusable items
+     * are skipped (the caller asks again for any shortfall); valid ones keep their order.
+     */
+    fun parseBatch(raw: String, random: Random): List<Question> {
+        val objStart = raw.indexOf('{')
+        val arrStart = raw.indexOf('[')
+        val array = if (arrStart >= 0 && (objStart < 0 || arrStart < objStart)) {
+            val end = raw.lastIndexOf(']')
+            require(end > arrStart) { "No JSON in reply" }
+            JSONArray(raw.substring(arrStart, end + 1))
+        } else {
+            JSONObject(extractJsonObject(raw)).optJSONArray("questions")
+                ?: throw IllegalArgumentException("Reply had no questions list")
+        }
+        val seen = mutableSetOf<String>()
+        return (0 until array.length()).mapNotNull { i ->
+            val obj = array.optJSONObject(i) ?: return@mapNotNull null
+            runCatching { parseQuestion(obj, random) }.getOrNull()
+                ?.takeIf { seen.add(it.text.lowercase()) }
+        }
+    }
+
+    /** Validates one question and shuffles its options so the correct letter is random. */
+    fun parseQuestion(obj: JSONObject, random: Random): Question {
         val text = obj.optString("question").trim()
         val correct = obj.optString("correct").trim()
         val wrongArray = obj.optJSONArray("wrong")
-            ?: throw IllegalArgumentException("Reply had no wrong answers")
+            ?: throw IllegalArgumentException("Question had no wrong answers")
         val explanation = obj.optString("explanation").trim()
         require(text.isNotEmpty()) { "Question was empty" }
         require(correct.isNotEmpty()) { "Correct answer was empty" }

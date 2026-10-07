@@ -12,6 +12,9 @@ val MODEL_OPTIONS = listOf(
 
 const val DEFAULT_MODEL = "claude-sonnet-5-5"
 
+/** Used for questions 1-5 and lifeline calls when "save money" is on. */
+const val CHEAP_MODEL = "claude-haiku-4-5-20251001"
+
 /**
  * Plain SharedPreferences, private to this app. Fine for a personal project; for a
  * published app, proxy calls through your own server rather than shipping user keys around.
@@ -26,6 +29,10 @@ class Prefs(context: Context) {
     var model: String
         get() = sp.getString("model", DEFAULT_MODEL).orEmpty().ifBlank { DEFAULT_MODEL }
         set(value) = sp.edit().putString("model", value).apply()
+
+    var cheapEasy: Boolean
+        get() = sp.getBoolean("cheap_easy", true)
+        set(value) = sp.edit().putBoolean("cheap_easy", value).apply()
 
     var friendName: String
         get() = sp.getString("friend_name", "Sam").orEmpty().ifBlank { "Sam" }

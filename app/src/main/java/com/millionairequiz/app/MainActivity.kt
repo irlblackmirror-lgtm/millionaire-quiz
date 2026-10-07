@@ -73,6 +73,7 @@ fun MillionaireApp(s: UiState, vm: GameViewModel) {
         SettingsDialog(
             currentKey = s.apiKey,
             currentModel = s.model,
+            currentCheapEasy = s.cheapEasy,
             onSave = vm::saveSettings,
             onDismiss = vm::closeSettings,
         )

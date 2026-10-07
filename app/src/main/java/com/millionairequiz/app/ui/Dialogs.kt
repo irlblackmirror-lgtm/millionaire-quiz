@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -25,6 +26,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -226,12 +229,14 @@ fun MessageDialog(title: String, message: String, onDismiss: () -> Unit) {
 fun SettingsDialog(
     currentKey: String,
     currentModel: String,
-    onSave: (apiKey: String, model: String) -> Unit,
+    currentCheapEasy: Boolean,
+    onSave: (apiKey: String, model: String, cheapEasy: Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var key by remember { mutableStateOf(currentKey) }
     var model by remember { mutableStateOf(currentModel) }
     var showKey by remember { mutableStateOf(false) }
+    var cheapEasy by remember { mutableStateOf(currentCheapEasy) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -296,10 +301,41 @@ fun SettingsDialog(
                     colors = fieldColors(),
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Spacer(Modifier.height(16.dp))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .toggleable(
+                            value = cheapEasy,
+                            onValueChange = { cheapEasy = it },
+                            role = Role.Switch,
+                        ),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Save money", color = Palette.White, fontWeight = FontWeight.Bold)
+                        Text(
+                            "Use Claude Haiku 4.5 for questions 1-5 and the lifelines. Questions 6-15 still use the model above.",
+                            color = Palette.Silver,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Switch(
+                        checked = cheapEasy,
+                        onCheckedChange = null,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Palette.Navy,
+                            checkedTrackColor = Palette.Gold,
+                            uncheckedThumbColor = Palette.Silver,
+                            uncheckedTrackColor = Palette.Panel,
+                        ),
+                    )
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(key, model) }, enabled = key.isNotBlank()) {
+            TextButton(onClick = { onSave(key, model, cheapEasy) }, enabled = key.isNotBlank()) {
                 Text("Save", color = if (key.isNotBlank()) Palette.Gold else Palette.Silver.copy(alpha = 0.4f))
             }
         },

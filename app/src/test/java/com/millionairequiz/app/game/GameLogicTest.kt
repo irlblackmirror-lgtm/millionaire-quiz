@@ -12,36 +12,60 @@ import kotlin.random.Random
 
 class GameLogicTest {
 
-    private val sampleReply = """
+    private fun q(text: String, correct: String, vararg wrong: String) =
+        """{"question": "$text", "correct": "$correct", "wrong": [${wrong.joinToString { "\"$it\"" }}], "explanation": "Because."}"""
+
+    private val sampleBatch = """
         Sure! ```json
-        {"question": "Which planet is known as the Red Planet?", "correct": "Mars",
-         "wrong": ["Venus", "Jupiter", "Saturn"], "explanation": "Iron oxide on its surface makes Mars look red."}
+        {"questions": [
+          ${q("Which planet is known as the Red Planet?", "Mars", "Venus", "Jupiter", "Saturn")},
+          ${q("Which is the largest planet?", "Jupiter", "Mars", "Earth", "Neptune")}
+        ]}
         ```
     """.trimIndent()
 
     @Test
-    fun parsesQuestionThroughFencesAndShufflesCorrectAnswer() {
+    fun parsesBatchThroughFencesAndShufflesCorrectAnswer() {
         val positions = mutableSetOf<Int>()
         repeat(40) { seed ->
-            val q = Prompts.parseQuestion(sampleReply, Random(seed))
-            assertEquals("Which planet is known as the Red Planet?", q.text)
-            assertEquals(4, q.options.size)
-            assertEquals("Mars", q.options[q.correctIndex])
-            assertEquals(4, q.options.toSet().size)
-            positions += q.correctIndex
+            val batch = Prompts.parseBatch(sampleBatch, Random(seed))
+            assertEquals(2, batch.size)
+            val first = batch[0]
+            assertEquals("Which planet is known as the Red Planet?", first.text)
+            assertEquals("Mars", first.options[first.correctIndex])
+            assertEquals(4, first.options.toSet().size)
+            assertEquals("Jupiter", batch[1].options[batch[1].correctIndex])
+            positions += first.correctIndex
         }
         assertEquals("correct answer should land in every slot", setOf(0, 1, 2, 3), positions)
     }
 
     @Test
-    fun rejectsQuestionsWithoutThreeDistinctWrongAnswers() {
-        val bad = """{"question": "Q?", "correct": "Mars", "wrong": ["mars", "Venus", "venus"], "explanation": ""}"""
+    fun batchSkipsBadItemsAndAcceptsBareArrays() {
+        val mixed = """{"questions": [
+            ${q("Good one?", "Yes", "No", "Maybe", "Never")},
+            ${q("Bad one?", "Mars", "mars", "Venus", "venus")},
+            ${q("Good one?", "Yes", "No", "Maybe", "Never")},
+            ${q("Another?", "A", "B", "C", "D")}
+        ]}"""
+        assertEquals(listOf("Good one?", "Another?"), Prompts.parseBatch(mixed, Random(1)).map { it.text })
+        val bare = "[${q("Bare?", "Yes", "No", "Maybe", "Never")}]"
+        assertEquals(1, Prompts.parseBatch(bare, Random(1)).size)
         try {
-            Prompts.parseQuestion(bad, Random(1))
+            Prompts.parseBatch("no json at all", Random(1))
             fail("should have thrown")
         } catch (e: IllegalArgumentException) {
             // expected
         }
+    }
+
+    @Test
+    fun batchPromptListsEachLevelAndPreviousQuestions() {
+        val p = Prompts.batchPrompt("Space", 5, 5, listOf("Old question?"), listOf("people", "places"))
+        assertTrue("questions 6 to 10" in p)
+        assertTrue("6. Worth £2,000" in p && "10. Worth £32,000" in p)
+        assertFalse("11. Worth" in p)
+        assertTrue("Old question?" in p && "exactly 5 questions" in p)
     }
 
     @Test
@@ -116,10 +140,8 @@ class GameLogicTest {
     }
 
     @Test
-    fun promptsMentionWhatTheyShould() {
+    fun lifelinePromptsMentionWhatTheyShould() {
         val q = Question("Capital of France?", listOf("Paris", "Lyon", "Nice", "Lille"), 0, "")
-        val qp = Prompts.questionPrompt("Geography", 14, listOf("Old question?"), "places")
-        assertTrue("£1,000,000" in qp && "Old question?" in qp && "Geography" in qp)
         val fp = Prompts.friendPrompt("Sam", "Geography", q, setOf(1, 2), FriendPlan(3, Confidence.GUESSING))
         assertTrue("D: Lille" in fp)
         assertFalse("B: Lyon" in fp)
