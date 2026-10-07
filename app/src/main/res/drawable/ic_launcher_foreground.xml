@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Gold diamond with a navy inner diamond and a gold centre: 108dp adaptive-icon canvas, art kept inside the 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#F5C542"
+        android:pathData="M54,22 L86,54 L54,86 L22,54 Z" />
+    <path
+        android:fillColor="#070B34"
+        android:pathData="M54,30 L78,54 L54,78 L30,54 Z" />
+    <path
+        android:fillColor="#F5C542"
+        android:pathData="M54,42 L66,54 L54,66 L42,54 Z" />
+</vector>
